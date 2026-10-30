@@ -28,19 +28,22 @@ import {
 
 export interface Preferences {
   name: string;
-  theme: "dark" | "light";
+  theme: "dark" | "light" | "system";
   timeFormat: "12h" | "24h";
   pin: string;
   notifications: boolean;
 }
 
 interface SharingState {
+  pairingOpen: boolean;
+  setPairingOpen: (open: boolean) => void;
   selfId: string;
   devices: Device[];
   transfers: Transfer[];
   history: Activity[];
   addresses: string[];
   status: "connecting" | "online" | "offline";
+  transport: "http" | "https" | null;
   error: string;
   preferences: Preferences;
   downloads: Record<string, string>;
@@ -112,12 +115,14 @@ function identify(): { platform: Platform; os: string; name: string } {
 }
 
 export function SharingProvider({ children }: { children: ReactNode }) {
+  const [pairingOpen, setPairingOpen] = useState(false);
   const [selfId, setSelfId] = useState("");
   const [devices, setDevices] = useState<Device[]>([]);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [history, setHistory] = useState<Activity[]>([]);
   const [addresses, setAddresses] = useState<string[]>([]);
   const [status, setStatus] = useState<SharingState["status"]>("connecting");
+  const [transport, setTransport] = useState<SharingState["transport"]>(null);
   const [error, setError] = useState("");
   const [preferences, setPreferences] = useState(defaultPreferences);
   const [downloads, setDownloads] = useState<Record<string, string>>({});
@@ -151,6 +156,22 @@ export function SharingProvider({ children }: { children: ReactNode }) {
     }
   });
 
+  const syncSystemTheme = useEffectEvent(() => {
+    if (preferences.theme === "system") {
+      document.documentElement.dataset.theme = window.matchMedia(
+        "(prefers-color-scheme: dark)",
+      ).matches
+        ? "dark"
+        : "light";
+    }
+  });
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    media.addEventListener("change", syncSystemTheme);
+    return () => media.removeEventListener("change", syncSystemTheme);
+  }, []);
+
   useEffect(() => {
     const identity = identify();
     let settings = { ...defaultPreferences, name: identity.name };
@@ -165,7 +186,10 @@ export function SharingProvider({ children }: { children: ReactNode }) {
             typeof saved.name === "string" && saved.name.trim()
               ? saved.name.slice(0, 40)
               : identity.name,
-          theme: saved.theme === "light" ? "light" : "dark",
+          theme:
+            saved.theme === "light" || saved.theme === "system"
+              ? saved.theme
+              : "dark",
           timeFormat: saved.timeFormat === "24h" ? "24h" : "12h",
           pin:
             typeof saved.pin === "string" && /^(?:[0-9]{4,8})?$/.test(saved.pin)
@@ -179,8 +203,16 @@ export function SharingProvider({ children }: { children: ReactNode }) {
     } catch {
       sessionId = uuid();
     }
-    document.documentElement.dataset.theme = settings.theme;
-    queueMicrotask(() => setPreferences(settings));
+    document.documentElement.dataset.theme =
+      settings.theme === "system"
+        ? window.matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light"
+        : settings.theme;
+    queueMicrotask(() => {
+      setPreferences(settings);
+      setTransport(location.protocol === "https:" ? "https" : "http");
+    });
     const socket = io({
       autoConnect: false,
       auth: { ...identity, name: settings.name, pin: settings.pin, sessionId },
@@ -456,7 +488,12 @@ export function SharingProvider({ children }: { children: ReactNode }) {
         "Browser storage is unavailable. Preferences will not persist after closing this tab.",
       );
     }
-    document.documentElement.dataset.theme = next.theme;
+    document.documentElement.dataset.theme =
+      next.theme === "system"
+        ? window.matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light"
+        : next.theme;
     setPreferences(next);
     if (socket) {
       const previousAuth = socket.auth as Record<string, unknown>;
@@ -492,12 +529,15 @@ export function SharingProvider({ children }: { children: ReactNode }) {
   return (
     <SharingContext.Provider
       value={{
+        pairingOpen,
+        setPairingOpen,
         selfId,
         devices,
         transfers,
         history,
         addresses,
         status,
+        transport,
         error,
         preferences,
         downloads,

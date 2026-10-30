@@ -6,9 +6,11 @@ import {
   ArrowDownToLine,
   ArrowUpRight,
   CircleHelp,
+  CircleAlert,
   Command,
   History,
   LayoutGrid,
+  QrCode,
   Radio,
   Settings2,
   ShieldCheck,
@@ -19,6 +21,7 @@ import { useSharing } from "@/hooks/use-sharing";
 import { Button } from "@/components/ui/button";
 import { Dialog, Tip } from "@/components/ui/dialog";
 import { IncomingFilesDialog } from "@/components/transfer-panel";
+import { PairingPanel } from "@/components/pairing-panel";
 
 const navigation = [
   { href: "/", label: "Overview", icon: LayoutGrid },
@@ -56,7 +59,16 @@ export function SetuMark({ size = 32 }: { size?: number }) {
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { status, preferences, transfers, selfId, error } = useSharing();
+  const {
+    status,
+    transport,
+    preferences,
+    transfers,
+    selfId,
+    error,
+    pairingOpen,
+    setPairingOpen,
+  } = useSharing();
   const [help, setHelp] = useState(false);
   const pending = transfers.filter(
     (item) => item.recipientId === selfId && item.status === "pending",
@@ -122,6 +134,16 @@ export function AppShell({ children }: { children: ReactNode }) {
             </Link>
           ))}
         </nav>
+        <Tip label="Connect a device">
+          <Button
+            className="sidebar-connect"
+            onClick={() => setPairingOpen(true)}
+            aria-label="Connect a device"
+          >
+            <QrCode size={18} />
+            <span>Connect a device</span>
+          </Button>
+        </Tip>
         <div className="sidebar-bottom">
           <Link
             href="/settings"
@@ -160,6 +182,26 @@ export function AppShell({ children }: { children: ReactNode }) {
             <strong>{current}</strong>
           </div>
           <div className="topbar-right">
+            <span
+              className={`transport-badge ${transport ?? "checking"}`}
+              title={
+                transport === "https"
+                  ? "HTTPS protects this connection; a room PIN is not end-to-end encryption."
+                  : "HTTP is unencrypted. Use a trusted network; a room PIN does not encrypt content."
+              }
+            >
+              {transport === "https" ? (
+                <ShieldCheck size={14} />
+              ) : (
+                <CircleAlert size={14} />
+              )}
+              {transport === "https"
+                ? "HTTPS"
+                : transport === "http"
+                  ? "HTTP"
+                  : "Checking"}
+              {transport === "http" && <span>Unencrypted</span>}
+            </span>
             <span className="network-pill">
               <i className={`status-dot ${status}`} />
               {status === "online"
@@ -178,7 +220,25 @@ export function AppShell({ children }: { children: ReactNode }) {
                 {preferences.name.slice(0, 2).toUpperCase()}
               </Link>
             </Tip>
+            <Tip label="Help & information">
+              <Button
+                className="mobile-help"
+                variant="ghost"
+                size="icon"
+                aria-label="Help & information"
+                onClick={() => setHelp(true)}
+              >
+                <CircleHelp size={20} />
+              </Button>
+            </Tip>
           </div>
+          <Button
+            className="mobile-connect"
+            variant="outline"
+            onClick={() => setPairingOpen(true)}
+          >
+            <QrCode size={18} /> Connect a device
+          </Button>
         </header>
         {error && (
           <div className="connection-error" role="alert">
@@ -235,6 +295,14 @@ export function AppShell({ children }: { children: ReactNode }) {
         <Button variant="outline" onClick={() => setHelp(false)}>
           <X size={16} /> Close
         </Button>
+      </Dialog>
+      <Dialog
+        open={pairingOpen}
+        onOpenChange={setPairingOpen}
+        title="Bring another device closer"
+        description="Your local session"
+      >
+        <PairingPanel />
       </Dialog>
       <IncomingFilesDialog />
     </div>

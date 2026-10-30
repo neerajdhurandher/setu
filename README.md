@@ -32,11 +32,14 @@ npm start
 - Live device discovery, platform identification, editable names, and connection status.
 - Multiple file selection, folder selection, drag-and-drop, and 1 GB combined selection validation (up to 100 files).
 - Recipient approval, real chunk-acknowledged progress, pause/resume, cancel/reject, and downloadable received files.
+- Incoming-file popups on every page, measured transfer speed/ETA, visible percentages, combined session progress, and interruption recovery guidance.
 - Instant text, code snippets with syntax highlighting, links, and manually shared clipboard content.
-- QR pairing with selectable host interfaces, optional PIN-isolated rooms, dark/light themes, and configurable in-app arrival notifications.
-- Searchable/filterable local SQLite history, with 24-hour expiry, a 200-item limit per browser session, and a clear-history action.
+- QR pairing with selectable host interfaces, connection steps and troubleshooting, optional PIN-isolated rooms, and visible HTTP/HTTPS status. A room PIN does not encrypt content.
+- Dark/light/system themes with live preview, unsaved-change and Reset controls, sticky mobile Save, 12/24-hour timestamps, and configurable in-app arrival notifications.
+- Searchable/filterable local SQLite history with type/status filters, functional sorting, readable mobile activity cards, and separate transfer-completion/download-availability states. Activity expires after 24 hours and is capped at 200 items per browser session.
+- Task-first mobile sharing with a sticky send bar, synchronized recipient selection, recipient-only nearby-device counts, and visible disabled-send explanations.
 - Production PWA manifest, local fonts, offline shell/fallback, and Docker configuration.
-- Keyboard navigation: Alt+1 through Alt+5 for Overview, Send, Receive, History, and Settings (outside text fields and dialogs).
+- Keyboard navigation: Alt+1 through Alt+5 for Overview, Send, Receive, History, and Settings (outside text fields and dialogs); Arrow keys, Home, and End switch Quick Share tabs. Mobile Help remains available in the top bar.
 
 ## Important Limits
 
@@ -86,6 +89,6 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-The browser suite builds and starts an isolated production server on port 3100 with in-memory history. It verifies discovery, text/link delivery, approved file downloads against their original bytes, navigation during transfer, history search/clear, theme persistence, responsive overflow, keyboard navigation, and offline shell recovery.
+The browser suite builds and starts an isolated production server on port 3100 with in-memory history. It verifies discovery, text/link delivery, byte-perfect approved downloads, navigation during transfer, history filtering/sorting/expiry, live and system theme behavior, disabled-send explanations, recipient counts, keyboard navigation, offline recovery, and controlled transfer speed/pause/failure feedback. Responsive checks cover 320/390/1024/1440px widths, helper-text contrast of at least 4.5:1 on the tested surfaces, and mobile Send visibility above navigation.
 
 The protocol integration tests run two real Socket.IO clients and cover room isolation, approval, chunk offsets, pause/resume, byte-for-byte delivery, file size validation, safe links, and SQLite retention.

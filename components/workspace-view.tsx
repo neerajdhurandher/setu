@@ -3,12 +3,12 @@
 import Link from "next/link";
 import {
   useDeferredValue,
+  useEffect,
   useId,
   useRef,
   useState,
   type FormEvent,
 } from "react";
-import { QRCodeSVG } from "qrcode.react";
 import hljs from "highlight.js/lib/core";
 import javascript from "highlight.js/lib/languages/javascript";
 import typescript from "highlight.js/lib/languages/typescript";
@@ -18,6 +18,7 @@ import bash from "highlight.js/lib/languages/bash";
 import {
   ArrowDown,
   ArrowDownLeft,
+  ArrowUp,
   ArrowRight,
   ArrowUpRight,
   Check,
@@ -62,6 +63,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, Tip } from "@/components/ui/dialog";
 import { SetuMark } from "@/components/app-shell";
 import { ShareIcon, TransferQueue } from "@/components/transfer-panel";
+import { PairingPanel } from "@/components/pairing-panel";
 
 hljs.registerLanguage("javascript", javascript);
 hljs.registerLanguage("typescript", typescript);
@@ -118,8 +120,8 @@ async function copy(value: string) {
 }
 
 export function WorkspaceView({ view }: { view: View }) {
-  const { history, devices, selfId, status } = useSharing();
-  const [pairing, setPairing] = useState(false);
+  const { history, devices, selfId, status, setPairingOpen } = useSharing();
+  const peers = devices.filter((device) => device.id !== selfId);
   const [recipientId, setRecipientId] = useState("");
   const completed = history.filter(
     (activity) => activity.status === "completed",
@@ -128,7 +130,7 @@ export function WorkspaceView({ view }: { view: View }) {
     .filter((activity) => activity.kind === "file")
     .reduce((total, activity) => total + activity.size, 0);
   return (
-    <div className="view-enter">
+    <div className={`view-enter view-${view}`}>
       <div className="page-heading">
         <div>
           <div className="eyebrow">
@@ -143,49 +145,38 @@ export function WorkspaceView({ view }: { view: View }) {
           </h1>
           <p>{titles[view].subtitle}</p>
         </div>
-        {view !== "settings" && (
-          <Button variant="outline" onClick={() => setPairing(true)}>
-            <QrCode size={17} /> Connect a device{" "}
-            <Plus className="button-tail" size={15} />
-          </Button>
-        )}
       </div>
       {view === "overview" && (
-        <div className="stats-strip">
-          <div className="stat">
-            <div className="stat-label">
-              <Radio size={16} /> Nearby devices
-            </div>
-            <div className="stat-value">
-              {devices.filter((device) => device.id !== selfId).length}
-              <span className="live-label">
-                <i className={`status-dot ${status}`} />
-                {status === "online" ? "Discovering live" : "Connecting"}
-              </span>
+        <div className="overview-top">
+          <div className="overview-summary">
+            <div className="stats-strip">
+              <div className="stat">
+                <div className="stat-label">
+                  <CheckCheck size={16} /> Completed shares
+                </div>
+                <div className="stat-value">
+                  {completed.length}
+                  <span>in the last 24 hours</span>
+                </div>
+              </div>
+              <div className="stat">
+                <div className="stat-label">
+                  <ArrowUpRight size={16} /> Data exchanged
+                </div>
+                <div className="stat-value">
+                  {formatBytes(bytes).split(" ")[0]}
+                  <span className="data-unit">
+                    {formatBytes(bytes).split(" ")[1]}
+                  </span>
+                  <span className="local-only">
+                    <LockKeyhole size={12} /> Local only
+                  </span>
+                </div>
+              </div>
             </div>
           </div>
-          <div className="stat">
-            <div className="stat-label">
-              <CheckCheck size={16} /> Completed shares
-            </div>
-            <div className="stat-value">
-              {completed.length}
-              <span>in the last 24 hours</span>
-            </div>
-          </div>
-          <div className="stat">
-            <div className="stat-label">
-              <ArrowUpRight size={16} /> Data exchanged
-            </div>
-            <div className="stat-value">
-              {formatBytes(bytes).split(" ")[0]}
-              <span className="data-unit">
-                {formatBytes(bytes).split(" ")[1]}
-              </span>
-              <span className="local-only">
-                <LockKeyhole size={12} /> Local only
-              </span>
-            </div>
+          <div className="overview-pairing">
+            <PairingPanel compact />
           </div>
         </div>
       )}
@@ -207,14 +198,23 @@ export function WorkspaceView({ view }: { view: View }) {
             <div className="section-heading">
               <h2>
                 Nearby devices{" "}
-                <span className="count-label">{devices.length}</span>
+                <span className="count-label">{peers.length}</span>
               </h2>
               <span className="live-indicator">
-                <i className={`status-dot ${status}`} /> Live
+                <i className={`status-dot ${status}`} />{" "}
+                {status === "online"
+                  ? "Live"
+                  : status === "connecting"
+                    ? "Connecting"
+                    : "Offline"}
               </span>
             </div>
-            <DeviceList selected={recipientId} onSelect={setRecipientId} />
-            <PairingPanel compact />
+            <DeviceList
+              selected={recipientId}
+              onSelect={setRecipientId}
+              onPair={() => setPairingOpen(true)}
+            />
+            {view === "send" && <PairingPanel compact />}
           </section>
         </div>
       )}
@@ -253,14 +253,6 @@ export function WorkspaceView({ view }: { view: View }) {
         />
       )}
       {view === "settings" && <SettingsFormWrapper />}
-      <Dialog
-        open={pairing}
-        onOpenChange={setPairing}
-        title="Bring another device closer"
-        description="Your local session"
-      >
-        <PairingPanel />
-      </Dialog>
     </div>
   );
 }
@@ -268,9 +260,11 @@ export function WorkspaceView({ view }: { view: View }) {
 function DeviceList({
   selected,
   onSelect,
+  onPair,
 }: {
   selected: string;
   onSelect: (id: string) => void;
+  onPair: () => void;
 }) {
   const { devices, selfId, status, preferences } = useSharing();
   const peers = devices.filter((device) => device.id !== selfId);
@@ -312,7 +306,10 @@ function DeviceList({
           </div>
           <span className="device-check">
             {selected === device.id ? (
-              <Check size={17} />
+              <>
+                <Check size={17} />
+                <span>Selected</span>
+              </>
             ) : (
               <ArrowUpRight size={17} />
             )}
@@ -336,89 +333,18 @@ function DeviceList({
               ? "No other devices connected yet"
               : "Connecting to your local host"}
           </span>
-          <div className="discovery-dots">
-            <i />
-            <i />
-            <i />
-          </div>
+          <Button variant="outline" size="small" onClick={onPair}>
+            <QrCode size={16} /> Open pairing
+          </Button>
+          <details className="connection-checklist">
+            <summary>Connection checklist</summary>
+            <p>
+              Use the same Wi-Fi and room PIN. Avoid guest-network isolation.
+              Allow Node.js incoming connections in the host firewall.
+            </p>
+          </details>
         </div>
       )}
-    </div>
-  );
-}
-
-function PairingPanel({ compact = false }: { compact?: boolean }) {
-  const { addresses, preferences, notify } = useSharing();
-  const [selectedAddress, setSelectedAddress] = useState("");
-  const address = addresses.includes(selectedAddress)
-    ? selectedAddress
-    : addresses[0] || "";
-  async function copyAddress() {
-    try {
-      await copy(address);
-      notify("Wi-Fi address copied.");
-    } catch (error) {
-      notify(
-        error instanceof Error ? error.message : "Could not copy address.",
-        "error",
-      );
-    }
-  }
-  return (
-    <div className={`pairing-panel ${compact ? "compact" : ""}`}>
-      <div className="qr-frame">
-        {address ? (
-          <QRCodeSVG
-            value={address}
-            size={compact ? 82 : 192}
-            marginSize={1}
-            level="M"
-            bgColor="#ffffff"
-            fgColor="#1a1a1b"
-            title="Join this Setu session"
-          />
-        ) : (
-          <QrCode size={compact ? 54 : 120} strokeWidth={1} />
-        )}
-      </div>
-      <div className="pairing-details">
-        <div className="eyebrow">YOUR LOCAL SESSION</div>
-        <h3>{compact ? "Room for one more." : "Your Wi-Fi address"}</h3>
-        <span className="muted">
-          {preferences.pin ? "PIN-protected room" : "Open local room"}
-        </span>
-        {addresses.length > 1 && !compact && (
-          <select
-            aria-label="Network interface"
-            value={address}
-            onChange={(event) => setSelectedAddress(event.target.value)}
-          >
-            {addresses.map((value) => (
-              <option key={value} value={value}>
-                {value}
-              </option>
-            ))}
-          </select>
-        )}
-        <div className="pairing-address">
-          <code>
-            {address
-              ? address.replace("http://", "")
-              : "No LAN address detected"}
-          </code>
-          <Tip label="Copy Wi-Fi address">
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Copy Wi-Fi address"
-              disabled={!address}
-              onClick={copyAddress}
-            >
-              <Copy size={14} />
-            </Button>
-          </Tip>
-        </div>
-      </div>
     </div>
   );
 }
@@ -441,11 +367,26 @@ function QuickShare({
   const [busy, setBusy] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
+  const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const peers = devices.filter((device) => device.id !== selfId);
   const recipient = peers.some((device) => device.id === recipientId)
     ? recipientId
     : "";
   const total = files.reduce((sum, file) => sum + file.size, 0);
+  const selectedDevice = peers.find((device) => device.id === recipient);
+  const disabledReason = busy
+    ? "Sending..."
+    : status !== "online"
+      ? "Waiting for connection"
+      : !recipient
+        ? "Choose a device"
+        : mode === "file" && !files.length
+          ? "Add files"
+          : mode === "text" && !content.trim()
+            ? "Enter text to share"
+            : mode === "link" && !isSafeLink(link)
+              ? "Enter a valid HTTP or HTTPS link"
+              : "";
   function addFiles(next: File[]) {
     const combined = [...files, ...next];
     if (
@@ -504,16 +445,35 @@ function QuickShare({
             { value: "text", label: "Text", icon: FileText },
             { value: "link", label: "Link", icon: Link2 },
           ] as const
-        ).map(({ value, label, icon: Icon }) => (
+        ).map(({ value, label, icon: Icon }, index) => (
           <button
             key={value}
+            ref={(element) => {
+              tabRefs.current[index] = element;
+            }}
             id={`${formId}-tab-${value}`}
             type="button"
             role="tab"
             aria-selected={mode === value}
             aria-controls={`${formId}-panel`}
+            tabIndex={mode === value ? 0 : -1}
             className={mode === value ? "selected" : ""}
             onClick={() => setMode(value)}
+            onKeyDown={(event) => {
+              if (
+                !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)
+              )
+                return;
+              event.preventDefault();
+              const next =
+                event.key === "Home"
+                  ? 0
+                  : event.key === "End"
+                    ? 2
+                    : (index + (event.key === "ArrowRight" ? 1 : 2)) % 3;
+              tabRefs.current[next]?.click();
+              tabRefs.current[next]?.focus();
+            }}
           >
             <Icon size={16} />
             <span>{label}</span>
@@ -703,16 +663,8 @@ function QuickShare({
         </div>
         <Button
           type="submit"
-          disabled={
-            busy ||
-            status !== "online" ||
-            !recipient ||
-            (mode === "file"
-              ? !files.length
-              : mode === "text"
-                ? !content.trim()
-                : !isSafeLink(link))
-          }
+          disabled={Boolean(disabledReason)}
+          aria-describedby={`${formId}-send-status`}
         >
           <span>
             {mode === "file" && files.length
@@ -725,6 +677,9 @@ function QuickShare({
             <ArrowRight size={18} aria-hidden="true" />
           )}
         </Button>
+        <p className="send-status" id={`${formId}-send-status`} role="status">
+          {disabledReason || `Ready to send to ${selectedDevice?.name}`}
+        </p>
       </div>
       {files.length > 0 && mode === "file" && (
         <div className="queue-summary">
@@ -755,15 +710,30 @@ function ActivityList({
   const [selected, setSelected] = useState<Activity | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [kindFilter, setKindFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [sort, setSort] = useState("newest");
   const deferredQuery = useDeferredValue(query);
-  const filtered = history.filter(
-    (item) =>
-      (!receivedOnly || item.direction === "received") &&
-      (filter === "all" || item.direction === filter) &&
-      `${item.name} ${item.senderName} ${item.recipientName} ${item.kind}`
-        .toLowerCase()
-        .includes(deferredQuery.toLowerCase()),
-  );
+  const filtered = history
+    .filter(
+      (item) =>
+        (!receivedOnly || item.direction === "received") &&
+        (filter === "all" || item.direction === filter) &&
+        (kindFilter === "all" || item.kind === kindFilter) &&
+        (statusFilter === "all" || item.status === statusFilter) &&
+        `${item.name} ${item.senderName} ${item.recipientName} ${item.kind}`
+          .toLowerCase()
+          .includes(deferredQuery.toLowerCase()),
+    )
+    .sort((first, second) =>
+      sort === "oldest"
+        ? first.createdAt - second.createdAt
+        : sort === "name-asc"
+          ? first.name.localeCompare(second.name)
+          : sort === "name-desc"
+            ? second.name.localeCompare(first.name)
+            : second.createdAt - first.createdAt,
+    );
   const visible = full || receivedOnly ? filtered : filtered.slice(0, 5);
   async function copyContent(content: string) {
     try {
@@ -851,16 +821,104 @@ function ActivityList({
           />
         </div>
       </div>
+      {full && (
+        <div className="history-filters">
+          <label>
+            Type
+            <select
+              aria-label="Activity type"
+              value={kindFilter}
+              onChange={(event) => setKindFilter(event.target.value)}
+            >
+              <option value="all">All types</option>
+              <option value="file">Files</option>
+              <option value="text">Text</option>
+              <option value="link">Links</option>
+              <option value="clipboard">Clipboard</option>
+            </select>
+          </label>
+          <label>
+            Status
+            <select
+              aria-label="Transfer status"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value)}
+            >
+              <option value="all">All statuses</option>
+              <option value="completed">Completed</option>
+              <option value="failed">Failed</option>
+              <option value="rejected">Rejected</option>
+              <option value="cancelled">Cancelled</option>
+            </select>
+          </label>
+          <label>
+            Sort
+            <select
+              aria-label="Sort activity"
+              value={sort}
+              onChange={(event) => setSort(event.target.value)}
+            >
+              <option value="newest">Newest first</option>
+              <option value="oldest">Oldest first</option>
+              <option value="name-asc">Name A-Z</option>
+              <option value="name-desc">Name Z-A</option>
+            </select>
+          </label>
+        </div>
+      )}
       <div className="activity-table-wrap">
-        <table className="activity-table">
+        <table className="activity-table" role="table">
           <thead>
             <tr>
-              <th>
-                NAME <ArrowDown size={11} />
+              <th
+                aria-sort={
+                  sort === "name-asc"
+                    ? "ascending"
+                    : sort === "name-desc"
+                      ? "descending"
+                      : "none"
+                }
+              >
+                <button
+                  className="table-sort"
+                  onClick={() =>
+                    setSort(sort === "name-asc" ? "name-desc" : "name-asc")
+                  }
+                >
+                  NAME{" "}
+                  {sort === "name-asc" ? (
+                    <ArrowUp size={12} />
+                  ) : (
+                    <ArrowDown size={12} />
+                  )}
+                </button>
               </th>
               <th className="type-column">TYPE</th>
               <th>DEVICE</th>
-              <th className="date-column">TIME</th>
+              <th
+                className="date-column"
+                aria-sort={
+                  sort === "newest"
+                    ? "descending"
+                    : sort === "oldest"
+                      ? "ascending"
+                      : "none"
+                }
+              >
+                <button
+                  className="table-sort"
+                  onClick={() =>
+                    setSort(sort === "newest" ? "oldest" : "newest")
+                  }
+                >
+                  TIME{" "}
+                  {sort === "oldest" ? (
+                    <ArrowUp size={12} />
+                  ) : (
+                    <ArrowDown size={12} />
+                  )}
+                </button>
+              </th>
               <th>STATUS</th>
               <th>
                 <span className="sr-only">Actions</span>
@@ -919,6 +977,9 @@ function ActivityList({
                       <ArrowDownLeft size={13} />
                     )}
                     <span>
+                      <span className="activity-direction">
+                        {item.direction === "sent" ? "To " : "From "}
+                      </span>
                       {item.direction === "sent"
                         ? item.recipientName
                         : item.senderName}
@@ -945,6 +1006,32 @@ function ActivityList({
                     )}
                     {item.status === "completed" ? "Completed" : item.status}
                   </span>
+                  {item.kind === "file" &&
+                    item.direction === "received" &&
+                    item.status === "completed" && (
+                      <span
+                        className={`download-availability ${downloads[item.id] ? "available" : "unavailable"}`}
+                      >
+                        {downloads[item.id]
+                          ? "Download available"
+                          : "Not stored in this tab"}
+                      </span>
+                    )}
+                  {item.status === "failed" && (
+                    <span className="download-availability">
+                      Interrupted. Reconnect and resend.
+                    </span>
+                  )}
+                  {item.status === "rejected" && (
+                    <span className="download-availability">
+                      Declined by recipient.
+                    </span>
+                  )}
+                  {item.status === "cancelled" && (
+                    <span className="download-availability">
+                      Transfer was cancelled.
+                    </span>
+                  )}
                 </td>
                 <td>
                   <div className="row-actions">
@@ -1017,6 +1104,10 @@ function ActivityList({
           </div>
         )}
       </div>
+      <p className="history-retention-note">
+        File contents stay in the receiving tab only. Reloading removes
+        downloads, not the transfer record.
+      </p>
       <div className="activity-foot">
         <span>
           {full
@@ -1117,11 +1208,26 @@ function ActivityList({
                 selected.kind === "file" &&
                 selected.direction === "received" && (
                   <span className="muted">
-                    Download unavailable in this tab
+                    Download unavailable in this tab. The file was not saved on
+                    the host; ask the sender to send it again.
                   </span>
                 )
               )}
             </div>
+            {selected.status === "failed" && (
+              <p className="connection-note">
+                This transfer was interrupted. Reconnect both devices and send
+                the file again.
+              </p>
+            )}
+            {selected.status !== "completed" &&
+              selected.direction === "sent" && (
+                <Button variant="outline" asChild>
+                  <Link href="/send" onClick={() => setSelected(null)}>
+                    <ArrowRight size={16} /> Send again
+                  </Link>
+                </Button>
+              )}
           </div>
         )}
       </Dialog>
@@ -1157,10 +1263,41 @@ function SettingsFormWrapper() {
 }
 
 function SettingsForm({ initial }: { initial: Preferences }) {
-  const { savePreferences, notify, addresses, transfers, status } =
+  const { savePreferences, notify, addresses, transfers, status, transport } =
     useSharing();
   const [form, setForm] = useState(initial);
   const [saving, setSaving] = useState(false);
+  const dirty = JSON.stringify(form) !== JSON.stringify(initial);
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const preview = () => {
+      document.documentElement.dataset.theme =
+        form.theme === "system"
+          ? media.matches
+            ? "dark"
+            : "light"
+          : form.theme;
+    };
+    preview();
+    media.addEventListener("change", preview);
+    return () => {
+      media.removeEventListener("change", preview);
+      document.documentElement.dataset.theme =
+        initial.theme === "system"
+          ? media.matches
+            ? "dark"
+            : "light"
+          : initial.theme;
+    };
+  }, [form.theme, initial.theme]);
+  useEffect(() => {
+    if (!dirty) return;
+    function warn(event: BeforeUnloadEvent) {
+      event.preventDefault();
+    }
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
   async function submit(event: FormEvent) {
     event.preventDefault();
     setSaving(true);
@@ -1218,7 +1355,7 @@ function SettingsForm({ initial }: { initial: Preferences }) {
         <div className="settings-fields">
           <label>Theme</label>
           <div className="theme-switch" role="group" aria-label="Theme">
-            {(["dark", "light"] as const).map((theme) => (
+            {(["dark", "light", "system"] as const).map((theme) => (
               <button
                 key={theme}
                 type="button"
@@ -1226,9 +1363,18 @@ function SettingsForm({ initial }: { initial: Preferences }) {
                 className={form.theme === theme ? "selected" : ""}
                 onClick={() => setForm({ ...form, theme })}
               >
-                {theme === "dark" ? <Moon size={17} /> : <Sun size={17} />}
-                {theme === "dark" ? "Dark" : "Light"}
-                {form.theme === theme && <Check size={15} />}
+                {theme === "dark" ? (
+                  <Moon size={17} />
+                ) : theme === "light" ? (
+                  <Sun size={17} />
+                ) : (
+                  <Monitor size={17} />
+                )}
+                {theme === "dark"
+                  ? "Dark"
+                  : theme === "light"
+                    ? "Light"
+                    : "System"}
               </button>
             ))}
           </div>
@@ -1287,7 +1433,10 @@ function SettingsForm({ initial }: { initial: Preferences }) {
               {form.pin
                 ? "PIN-protected discovery"
                 : "Local-network-only discovery"}
-              <small>File transfers always require approval.</small>
+              <small>
+                A room PIN is not encryption. File transfers always require
+                approval.
+              </small>
             </span>
           </div>
         </div>
@@ -1359,16 +1508,28 @@ function SettingsForm({ initial }: { initial: Preferences }) {
           ))}
           <span className="input-hint">
             {addresses.length
-              ? "HTTP - unencrypted local connection"
+              ? transport === "https"
+                ? "HTTPS - encrypted connection to the host"
+                : "HTTP - unencrypted local connection"
               : "No local network interface detected"}
           </span>
         </div>
       </section>
       <div className="settings-save">
-        <span>
-          <SetuMark size={20} /> Just between your devices.
+        <span aria-live="polite" className={dirty ? "unsaved-indicator" : ""}>
+          <SetuMark size={20} />{" "}
+          {dirty ? "Unsaved changes" : "All changes saved"}
         </span>
-        <Button disabled={saving} type="submit">
+        {dirty && (
+          <Button
+            variant="ghost"
+            type="button"
+            onClick={() => setForm(initial)}
+          >
+            Reset
+          </Button>
+        )}
+        <Button disabled={saving || !dirty} type="submit">
           {saving ? <Loader2 size={16} className="spin" /> : <Save size={16} />}{" "}
           Save preferences
         </Button>

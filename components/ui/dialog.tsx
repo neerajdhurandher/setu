@@ -28,7 +28,7 @@ export function Dialog({
             <DialogPrimitive.Title>{title}</DialogPrimitive.Title>
             <DialogPrimitive.Close asChild>
               <Button variant="ghost" size="icon" aria-label="Close dialog">
-                <X size={18} />
+                <X size={18} color="var(--accent)" />
               </Button>
             </DialogPrimitive.Close>
           </div>

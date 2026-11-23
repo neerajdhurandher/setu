@@ -1,0 +1,15 @@
+services:
+  setu:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      SETU_PUBLIC_URL: ${SETU_PUBLIC_URL:-}
+      SETU_PIN: ${SETU_PIN:-}
+    volumes:
+      - setu-data:/app/data
+    restart: unless-stopped
+    init: true
+
+volumes:
+  setu-data:

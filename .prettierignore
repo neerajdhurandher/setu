@@ -1,0 +1,11 @@
+node_modules
+.next
+package-lock.json
+AGENTS.md
+project_breif.md
+public/sw.js
+public/offline.html
+public/icon.svg
+test-results
+playwright-report
+database/*.sqlite*

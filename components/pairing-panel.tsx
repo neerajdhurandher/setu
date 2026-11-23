@@ -8,7 +8,16 @@ import { Button } from "@/components/ui/button";
 import { Tip } from "@/components/ui/dialog";
 
 export function PairingPanel({ compact = false }: { compact?: boolean }) {
-  const { addresses, preferences, transport, notify } = useSharing();
+  const {
+    addresses,
+    preferences,
+    transport,
+    notify,
+    mode,
+    roomExpiresAt,
+    createRoom,
+    leaveRoom,
+  } = useSharing();
   const [selectedAddress, setSelectedAddress] = useState("");
   const address = addresses.includes(selectedAddress)
     ? selectedAddress
@@ -21,7 +30,11 @@ export function PairingPanel({ compact = false }: { compact?: boolean }) {
           "Clipboard access requires HTTPS or localhost in this browser.",
         );
       await navigator.clipboard.writeText(address);
-      notify("Wi-Fi address copied.");
+      notify(
+        mode === "public"
+          ? "Private invitation copied. Share it only with intended participants."
+          : "Wi-Fi address copied.",
+      );
     } catch (error) {
       notify(
         error instanceof Error ? error.message : "Could not copy address.",
@@ -30,6 +43,72 @@ export function PairingPanel({ compact = false }: { compact?: boolean }) {
     }
   }
 
+  if (mode === "public")
+    return (
+      <div className="pairing-panel">
+        <h3 className="pairing-title">Your private sharing room</h3>
+        <div className="qr-frame">
+          {address ? (
+            <QRCodeSVG
+              value={address}
+              size={compact ? 112 : 192}
+              marginSize={1}
+              title="Join this private Setu room"
+            />
+          ) : (
+            <QrCode size={80} />
+          )}
+        </div>
+        <div className="pairing-details">
+          <div className="eyebrow">NO ACCOUNT. DIRECT SHARING.</div>
+          {address && (
+            <div className="pairing-address">
+              <code>Private invitation ready</code>
+              <Button variant="ghost" onClick={copyAddress}>
+                Copy invitation
+              </Button>
+            </div>
+          )}
+          {roomExpiresAt && (
+            <p>
+              Room expires at {new Date(roomExpiresAt).toLocaleTimeString()}.
+            </p>
+          )}
+          <ol className="pairing-steps">
+            <li>Connect both devices to the same Wi-Fi.</li>
+            <li>Scan this QR code or open the copied invitation.</li>
+            <li>Choose the other device and approve incoming files.</li>
+          </ol>
+          <p className="connection-note">
+            Files, text and clipboard travel directly between browsers over
+            encrypted WebRTC. Oracle handles pairing only. No cloud file relay
+            is used. Guest Wi-Fi isolation can prevent a direct connection.
+            Anyone with this invitation can join until it expires.
+          </p>
+          <Button
+            onClick={() => {
+              void createRoom().catch((error: Error) =>
+                notify(error.message, "error"),
+              );
+            }}
+          >
+            Create new room
+          </Button>
+          {roomExpiresAt && (
+            <Button
+              variant="outline"
+              onClick={() => {
+                void leaveRoom().catch((error: Error) =>
+                  notify(error.message, "error"),
+                );
+              }}
+            >
+              Leave room
+            </Button>
+          )}
+        </div>
+      </div>
+    );
   return (
     <div className={`pairing-panel ${compact ? "compact" : ""}`}>
       <h3 className="pairing-title">

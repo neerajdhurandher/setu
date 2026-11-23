@@ -1443,6 +1443,15 @@ h1 {
   gap: 5px;
   align-items: center;
 }
+.batch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.batch-actions:not(:empty) {
+  margin-bottom: 14px;
+}
 .progress-track {
   height: 3px;
   background: var(--border);

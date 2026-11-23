@@ -4,6 +4,7 @@ import Link from "next/link";
 import {
   useDeferredValue,
   useEffect,
+  useEffectEvent,
   useId,
   useRef,
   useState,
@@ -41,7 +42,7 @@ import {
   Plus,
   QrCode,
   Radio,
-  Save,
+  RotateCcw,
   Search,
   ShieldCheck,
   Smartphone,
@@ -62,7 +63,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { Dialog, Tip } from "@/components/ui/dialog";
 import { SetuMark } from "@/components/app-shell";
-import { ShareIcon, TransferQueue } from "@/components/transfer-panel";
+import {
+  DownloadAllButton,
+  ShareIcon,
+  TransferQueue,
+} from "@/components/transfer-panel";
 import { PairingPanel } from "@/components/pairing-panel";
 
 hljs.registerLanguage("javascript", javascript);
@@ -266,7 +271,7 @@ function DeviceList({
   onSelect: (id: string) => void;
   onPair: () => void;
 }) {
-  const { devices, selfId, status, preferences } = useSharing();
+  const { devices, selfId, status, preferences, mode } = useSharing();
   const peers = devices.filter((device) => device.id !== selfId);
   const self = devices.find((device) => device.id === selfId);
   return (
@@ -331,7 +336,9 @@ function DeviceList({
           <span>
             {status === "online"
               ? "No other devices connected yet"
-              : "Connecting to your local host"}
+              : mode === "public"
+                ? "Connecting to the pairing server"
+                : "Connecting to your local host"}
           </span>
           <Button variant="outline" size="small" onClick={onPair}>
             <QrCode size={16} /> Open pairing
@@ -339,8 +346,9 @@ function DeviceList({
           <details className="connection-checklist">
             <summary>Connection checklist</summary>
             <p>
-              Use the same Wi-Fi and room PIN. Avoid guest-network isolation.
-              Allow Node.js incoming connections in the host firewall.
+              {mode === "public"
+                ? "Open the private QR invitation on the other device. Use the same Wi-Fi and avoid guest-network isolation. No cloud file relay fallback is used."
+                : "Use the same Wi-Fi and room PIN. Avoid guest-network isolation. Allow Node.js incoming connections in the host firewall."}
             </p>
           </details>
         </div>
@@ -786,6 +794,9 @@ function ActivityList({
             </Link>
           )
         )}
+      </div>
+      <div className="batch-actions">
+        <DownloadAllButton items={visible} />
       </div>
       <div className="activity-toolbar">
         {!receivedOnly && (
@@ -1256,40 +1267,77 @@ function ActivityList({
 }
 
 function SettingsFormWrapper() {
-  const { preferences } = useSharing();
-  return (
-    <SettingsForm key={JSON.stringify(preferences)} initial={preferences} />
-  );
+  const { preferences, preferencesReady } = useSharing();
+  return preferencesReady ? <SettingsForm initial={preferences} /> : null;
 }
 
 function SettingsForm({ initial }: { initial: Preferences }) {
-  const { savePreferences, notify, addresses, transfers, status, transport } =
-    useSharing();
+  const {
+    savePreferences,
+    notify,
+    addresses,
+    transfers,
+    status,
+    transport,
+    mode,
+    configurationReady,
+  } = useSharing();
+  const [resetTarget] = useState(initial);
   const [form, setForm] = useState(initial);
+  const [saved, setSaved] = useState(initial);
   const [saving, setSaving] = useState(false);
-  const dirty = JSON.stringify(form) !== JSON.stringify(initial);
+  const [saveError, setSaveError] = useState("");
+  const immediate = useRef(false);
+  const attempted = useRef("");
+  const dirty = JSON.stringify(form) !== JSON.stringify(saved);
+  const changedFromInitial =
+    JSON.stringify(saved) !== JSON.stringify(resetTarget) || dirty;
+  const validation = !form.name.trim()
+    ? "Device names must be between 1 and 40 characters."
+    : !/^(?:[0-9]{4,8})?$/.test(form.pin)
+      ? "Room PINs must be 4 to 8 digits, or empty."
+      : form.pin !== saved.pin &&
+          transfers.some((item) =>
+            ["pending", "transferring", "paused"].includes(item.status),
+          )
+        ? "Finish or cancel active transfers before changing rooms."
+        : "";
+
+  function edit(next: Preferences, saveImmediately = true) {
+    immediate.current = saveImmediately;
+    attempted.current = "";
+    setSaveError("");
+    setForm({ ...next });
+  }
+
+  const persist = useEffectEvent(async () => {
+    const snapshot = form;
+    attempted.current = JSON.stringify(snapshot);
+    setSaveError("");
+    setSaving(true);
+    try {
+      await savePreferences(snapshot);
+      setSaved(snapshot);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Could not save preferences.";
+      setSaveError(message);
+      notify(message, "error");
+    } finally {
+      setSaving(false);
+    }
+  });
   useEffect(() => {
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const preview = () => {
-      document.documentElement.dataset.theme =
-        form.theme === "system"
-          ? media.matches
-            ? "dark"
-            : "light"
-          : form.theme;
-    };
-    preview();
-    media.addEventListener("change", preview);
-    return () => {
-      media.removeEventListener("change", preview);
-      document.documentElement.dataset.theme =
-        initial.theme === "system"
-          ? media.matches
-            ? "dark"
-            : "light"
-          : initial.theme;
-    };
-  }, [form.theme, initial.theme]);
+    if (
+      !dirty ||
+      saving ||
+      validation ||
+      attempted.current === JSON.stringify(form)
+    )
+      return;
+    const timer = setTimeout(() => void persist(), immediate.current ? 0 : 500);
+    return () => clearTimeout(timer);
+  }, [form, dirty, saving, validation]);
   useEffect(() => {
     if (!dirty) return;
     function warn(event: BeforeUnloadEvent) {
@@ -1298,31 +1346,11 @@ function SettingsForm({ initial }: { initial: Preferences }) {
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty]);
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setSaving(true);
-    try {
-      if (
-        form.pin !== initial.pin &&
-        transfers.some((item) =>
-          ["pending", "transferring", "paused"].includes(item.status),
-        )
-      )
-        throw new Error(
-          "Finish or cancel active transfers before changing rooms.",
-        );
-      await savePreferences(form);
-    } catch (error) {
-      notify(
-        error instanceof Error ? error.message : "Could not save preferences.",
-        "error",
-      );
-    } finally {
-      setSaving(false);
-    }
-  }
   return (
-    <form className="settings-form" onSubmit={submit}>
+    <form
+      className="settings-form"
+      onSubmit={(event) => event.preventDefault()}
+    >
       <section className="settings-section">
         <div className="settings-section-heading">
           <Monitor size={20} />
@@ -1338,7 +1366,10 @@ function SettingsForm({ initial }: { initial: Preferences }) {
             value={form.name}
             maxLength={40}
             required
-            onChange={(event) => setForm({ ...form, name: event.target.value })}
+            onChange={(event) =>
+              edit({ ...form, name: event.target.value }, false)
+            }
+            onBlur={() => edit(form)}
             autoComplete="off"
           />
           <span className="input-hint">{form.name.length} / 40</span>
@@ -1361,7 +1392,7 @@ function SettingsForm({ initial }: { initial: Preferences }) {
                 type="button"
                 aria-pressed={form.theme === theme}
                 className={form.theme === theme ? "selected" : ""}
-                onClick={() => setForm({ ...form, theme })}
+                onClick={() => edit({ ...form, theme })}
               >
                 {theme === "dark" ? (
                   <Moon size={17} />
@@ -1391,7 +1422,7 @@ function SettingsForm({ initial }: { initial: Preferences }) {
                   type="button"
                   aria-pressed={form.timeFormat === timeFormat}
                   className={form.timeFormat === timeFormat ? "selected" : ""}
-                  onClick={() => setForm({ ...form, timeFormat })}
+                  onClick={() => edit({ ...form, timeFormat })}
                 >
                   {timeFormat === "12h" ? "12-hour" : "24-hour"}
                   {form.timeFormat === timeFormat && <Check size={15} />}
@@ -1406,13 +1437,20 @@ function SettingsForm({ initial }: { initial: Preferences }) {
           <LockKeyhole size={20} />
           <div>
             <h2>Room & privacy</h2>
-            <span className="muted">An optional shared PIN</span>
+            <span className="muted">
+              {!configurationReady
+                ? "Waiting for connection details"
+                : mode === "public"
+                  ? "Private invitation-based pairing"
+                  : "An optional shared PIN"}
+            </span>
           </div>
         </div>
         <div className="settings-fields">
           <label htmlFor="room-pin">Room PIN</label>
           <input
             id="room-pin"
+            disabled={!configurationReady || mode === "public"}
             value={form.pin}
             type="password"
             inputMode="numeric"
@@ -1421,21 +1459,36 @@ function SettingsForm({ initial }: { initial: Preferences }) {
             placeholder="No PIN - open local room"
             autoComplete="off"
             onChange={(event) =>
-              setForm({ ...form, pin: event.target.value.replace(/\D/g, "") })
+              edit(
+                { ...form, pin: event.target.value.replace(/\D/g, "") },
+                false,
+              )
             }
+            onBlur={() => edit(form)}
           />
           <span className="input-hint">
-            4-8 digits, or leave empty for the open room
+            {!configurationReady
+              ? "Room settings are unavailable until the server configuration loads."
+              : mode === "public"
+                ? "Use Connect a device to create or share a private room invitation. Numeric PINs are not used in public mode."
+                : "4-8 digits, or leave empty for the open room"}
           </span>
           <div className="security-note">
             <ShieldCheck size={17} />
             <span>
-              {form.pin
-                ? "PIN-protected discovery"
-                : "Local-network-only discovery"}
+              {!configurationReady
+                ? "Room status unavailable"
+                : mode === "public"
+                  ? "Direct encrypted WebRTC sharing"
+                  : form.pin
+                    ? "PIN-protected discovery"
+                    : "Local-network-only discovery"}
               <small>
-                A room PIN is not encryption. File transfers always require
-                approval.
+                {!configurationReady
+                  ? "Reconnect to check the room and privacy settings."
+                  : mode === "public"
+                    ? "Content stays between the browsers. History stays in this tab. File transfers require approval."
+                    : "A room PIN is not encryption. File transfers always require approval."}
               </small>
             </span>
           </div>
@@ -1458,7 +1511,7 @@ function SettingsForm({ initial }: { initial: Preferences }) {
               role="switch"
               checked={form.notifications}
               onChange={(event) =>
-                setForm({ ...form, notifications: event.target.checked })
+                edit({ ...form, notifications: event.target.checked })
               }
             />
             <span className="toggle-track" aria-hidden="true" />
@@ -1470,14 +1523,20 @@ function SettingsForm({ initial }: { initial: Preferences }) {
           <Wifi size={20} />
           <div>
             <h2>Network</h2>
-            <span className="muted">Current host addresses</span>
+            <span className="muted">
+              {mode === "public"
+                ? "Private pairing invitation"
+                : "Current host addresses"}
+            </span>
           </div>
         </div>
         <div className="settings-fields">
           <span className="network-detail-status">
             <i className={`status-dot ${status}`} />
             {status === "online"
-              ? "Connected to local host"
+              ? mode === "public"
+                ? "Connected to pairing server"
+                : "Connected to local host"
               : "Host unavailable"}
           </span>
           {addresses.map((address) => (
@@ -1516,23 +1575,38 @@ function SettingsForm({ initial }: { initial: Preferences }) {
         </div>
       </section>
       <div className="settings-save">
-        <span aria-live="polite" className={dirty ? "unsaved-indicator" : ""}>
-          <SetuMark size={20} />{" "}
-          {dirty ? "Unsaved changes" : "All changes saved"}
+        <span
+          role="status"
+          className={validation || saveError ? "unsaved-indicator" : ""}
+        >
+          {saving ? (
+            <Loader2 size={20} className="spin" />
+          ) : (
+            <SetuMark size={20} />
+          )}
+          {validation ||
+            saveError ||
+            (saving
+              ? "Saving changes..."
+              : dirty
+                ? "Changes save automatically"
+                : "All changes saved")}
         </span>
-        {dirty && (
+        {changedFromInitial && (
           <Button
             variant="ghost"
             type="button"
-            onClick={() => setForm(initial)}
+            disabled={saving && !dirty}
+            onClick={() => edit(resetTarget)}
           >
-            Reset
+            <RotateCcw size={15} /> Reset
           </Button>
         )}
-        <Button disabled={saving || !dirty} type="submit">
-          {saving ? <Loader2 size={16} className="spin" /> : <Save size={16} />}{" "}
-          Save preferences
-        </Button>
+        {saveError && (
+          <Button variant="ghost" type="button" onClick={() => edit(form)}>
+            Retry
+          </Button>
+        )}
       </div>
     </form>
   );

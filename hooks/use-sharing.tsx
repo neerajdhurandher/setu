@@ -11,12 +11,15 @@ import {
 } from "react";
 import { io, type Socket } from "socket.io-client";
 import { v4 as uuid } from "uuid";
+import { z } from "zod";
+import { DirectSharing } from "@/lib/direct-sharing";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { CheckCircle2, CircleAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   CHUNK_SIZE,
   MAX_FILE_SIZE,
+  RETENTION_MS,
   type Activity,
   type Device,
   type Platform,
@@ -35,6 +38,11 @@ export interface Preferences {
 }
 
 interface SharingState {
+  mode: "lan" | "public";
+  configurationReady: boolean;
+  roomExpiresAt: number | null;
+  createRoom: () => Promise<void>;
+  leaveRoom: () => Promise<void>;
   pairingOpen: boolean;
   setPairingOpen: (open: boolean) => void;
   selfId: string;
@@ -46,7 +54,9 @@ interface SharingState {
   transport: "http" | "https" | null;
   error: string;
   preferences: Preferences;
+  preferencesReady: boolean;
   downloads: Record<string, string>;
+  controllingIds: Set<string>;
   notify: (message: string, tone?: "success" | "error") => void;
   sendFiles: (files: File[], recipientId: string) => Promise<void>;
   sendText: (
@@ -115,6 +125,15 @@ function identify(): { platform: Platform; os: string; name: string } {
 }
 
 export function SharingProvider({ children }: { children: ReactNode }) {
+  const [config, setConfig] = useState<{
+    mode: "lan" | "public";
+    iceServers?: RTCIceServer[];
+  } | null>(null);
+  const [roomExpiresAt, setRoomExpiresAt] = useState<number | null>(null);
+  const invitationRef = useRef<string | null>(null);
+  const roomOwnerRef = useRef(false);
+  const directHistoryLoaded = useRef(false);
+  const directRef = useRef<DirectSharing | null>(null);
   const [pairingOpen, setPairingOpen] = useState(false);
   const [selfId, setSelfId] = useState("");
   const [devices, setDevices] = useState<Device[]>([]);
@@ -125,7 +144,10 @@ export function SharingProvider({ children }: { children: ReactNode }) {
   const [transport, setTransport] = useState<SharingState["transport"]>(null);
   const [error, setError] = useState("");
   const [preferences, setPreferences] = useState(defaultPreferences);
+  const [preferencesReady, setPreferencesReady] = useState(false);
   const [downloads, setDownloads] = useState<Record<string, string>>({});
+  const [controllingIds, setControllingIds] = useState<Set<string>>(new Set());
+  const controlsInFlight = useRef(new Set<string>());
   const [toast, setToast] = useState<{
     message: string;
     tone: "success" | "error";
@@ -142,6 +164,169 @@ export function SharingProvider({ children }: { children: ReactNode }) {
   function notify(message: string, tone: "success" | "error" = "success") {
     setToast({ message, tone });
   }
+
+  async function createRoom() {
+    const socket = socketRef.current;
+    if (!socket) throw new Error("Not connected to the pairing server.");
+    if (roomExpiresAt) await request(socket, "room:leave");
+    directRef.current?.close();
+    directRef.current = null;
+    invitationRef.current = null;
+    roomOwnerRef.current = false;
+    setAddresses([]);
+    setRoomExpiresAt(null);
+    setDevices([]);
+    const room = await request<{ invitation: string; expiresAt: number }>(
+      socket,
+      "room:create",
+    );
+    invitationRef.current = room.invitation;
+    roomOwnerRef.current = true;
+    setAddresses([`${location.origin}/#join=${room.invitation}`]);
+    setRoomExpiresAt(room.expiresAt);
+    setError("");
+  }
+
+  async function leaveRoom() {
+    const socket = socketRef.current;
+    if (!socket) throw new Error("Not connected to the pairing server.");
+    await request(socket, "room:leave");
+    directRef.current?.close();
+    directRef.current = null;
+    invitationRef.current = null;
+    roomOwnerRef.current = false;
+    setAddresses([]);
+    setRoomExpiresAt(null);
+    setDevices([]);
+  }
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let initializing = false;
+    let initialized = false;
+    const schema = z.discriminatedUnion("mode", [
+      z.object({ mode: z.literal("lan") }),
+      z.object({
+        mode: z.literal("public"),
+        iceServers: z
+          .array(
+            z.object({
+              urls: z.union([
+                z.string().regex(/^stuns?:/),
+                z.array(z.string().regex(/^stuns?:/)),
+              ]),
+            }),
+          )
+          .max(8),
+      }),
+    ]);
+    function initialize() {
+      if (initializing || initialized) return;
+      initializing = true;
+      void fetch("/api/config", {
+        cache: "no-store",
+        signal: controller.signal,
+      })
+        .then(async (response) => {
+          if (!response.ok)
+            throw new Error("Cannot load sharing configuration.");
+          const value = schema.parse(await response.json());
+          if (value.mode === "public") {
+            const invitation = new URLSearchParams(location.hash.slice(1)).get(
+              "join",
+            );
+            if (invitation) {
+              invitationRef.current = invitation;
+              window.history.replaceState(null, "", location.pathname);
+            }
+            const session = await fetch("/api/session", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-Setu-Request": "1",
+              },
+              body: "{}",
+              cache: "no-store",
+              signal: controller.signal,
+            });
+            if (!session.ok)
+              throw new Error("Cannot establish an anonymous sharing session.");
+          }
+          initialized = true;
+          setConfig(value);
+        })
+        .catch((failure: unknown) => {
+          if (!controller.signal.aborted) {
+            setStatus("offline");
+            setError(
+              failure instanceof Error
+                ? failure.message
+                : "Cannot initialize sharing.",
+            );
+          }
+        })
+        .finally(() => {
+          initializing = false;
+        });
+    }
+    initialize();
+    window.addEventListener("online", initialize);
+    return () => {
+      window.removeEventListener("online", initialize);
+      controller.abort();
+    };
+  }, []);
+
+  const storeDirectActivity = useEffectEvent((activity: Activity) => {
+    setHistory((previous) => {
+      const next = [
+        activity,
+        ...previous.filter(
+          (item) =>
+            item.id !== activity.id &&
+            item.createdAt >= Date.now() - RETENTION_MS,
+        ),
+      ].slice(0, 200);
+      return next;
+    });
+    if (
+      preferences.notifications &&
+      activity.direction === "received" &&
+      activity.status === "completed"
+    ) {
+      setToast({
+        message: `${activity.kind === "file" ? activity.name : "New " + activity.kind} received from ${activity.senderName}.`,
+        tone: "success",
+      });
+    }
+  });
+
+  useEffect(() => {
+    if (config?.mode !== "public" || !directHistoryLoaded.current) return;
+    try {
+      sessionStorage.setItem("setu.direct-history", JSON.stringify(history));
+    } catch {
+      queueMicrotask(() =>
+        notify(
+          "Browser history storage is full or unavailable. Activity will not survive reload.",
+          "error",
+        ),
+      );
+    }
+  }, [history, config]);
+
+  useEffect(() => {
+    if (config?.mode !== "public") return;
+    const timer = setInterval(() => {
+      setHistory((previous) => {
+        const next = previous.filter(
+          (item) => item.createdAt >= Date.now() - RETENTION_MS,
+        );
+        return next.length === previous.length ? previous : next;
+      });
+    }, 60_000);
+    return () => clearInterval(timer);
+  }, [config]);
 
   const announceReceived = useEffectEvent((activity: Activity) => {
     if (
@@ -175,7 +360,6 @@ export function SharingProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const identity = identify();
     let settings = { ...defaultPreferences, name: identity.name };
-    let sessionId: string = uuid();
     try {
       const saved = JSON.parse(
         localStorage.getItem("setu.preferences") ?? "null",
@@ -197,11 +381,10 @@ export function SharingProvider({ children }: { children: ReactNode }) {
               : "",
           notifications: saved.notifications !== false,
         };
-      const existing = sessionStorage.getItem("setu.session");
-      if (existing && /^[0-9a-f-]{36}$/i.test(existing)) sessionId = existing;
-      sessionStorage.setItem("setu.session", sessionId);
     } catch {
-      sessionId = uuid();
+      queueMicrotask(() =>
+        notify("Saved preferences are unavailable or invalid.", "error"),
+      );
     }
     document.documentElement.dataset.theme =
       settings.theme === "system"
@@ -211,8 +394,30 @@ export function SharingProvider({ children }: { children: ReactNode }) {
         : settings.theme;
     queueMicrotask(() => {
       setPreferences(settings);
+      setPreferencesReady(true);
       setTransport(location.protocol === "https:" ? "https" : "http");
     });
+  }, []);
+
+  const getCurrentPreferences = useEffectEvent(() => preferences);
+
+  useEffect(() => {
+    if (!config || !preferencesReady) return;
+    const identity = identify();
+    const settings = getCurrentPreferences();
+    let sessionId: string = uuid();
+    try {
+      const existing = sessionStorage.getItem("setu.session");
+      if (existing && /^[0-9a-f-]{36}$/i.test(existing)) sessionId = existing;
+      sessionStorage.setItem("setu.session", sessionId);
+    } catch {
+      queueMicrotask(() =>
+        notify(
+          "Browser session storage is unavailable. Session history may not persist.",
+          "error",
+        ),
+      );
+    }
     const socket = io({
       autoConnect: false,
       auth: { ...identity, name: settings.name, pin: settings.pin, sessionId },
@@ -262,15 +467,127 @@ export function SharingProvider({ children }: { children: ReactNode }) {
       void pump(id);
     };
 
+    const setupDirect = (devices: Device[]) => {
+      if (!directRef.current)
+        directRef.current = new DirectSharing(socket, config.iceServers ?? [], {
+          transfer: (transfer) => {
+            transferMap.current.set(transfer.id, transfer);
+            if (transferMap.current.size > 200) {
+              const oldest = [...transferMap.current.values()].find(
+                (item) => !isActive(item),
+              );
+              if (oldest) transferMap.current.delete(oldest.id);
+            }
+            setTransfers(
+              [...transferMap.current.values()].sort(
+                (a, b) => b.createdAt - a.createdAt,
+              ),
+            );
+          },
+          activity: storeDirectActivity,
+          download: (id, url, size) => {
+            urls.current.set(id, { url, size });
+            setDownloads((previous) => ({ ...previous, [id]: url }));
+          },
+          receivedBytes: () =>
+            [...urls.current.values()].reduce(
+              (sum, item) => sum + item.size,
+              0,
+            ),
+          error: (message) => notify(message, "error"),
+        });
+      directRef.current.setDevices(devices);
+    };
     socket.on("welcome", (welcome: Welcome) => {
       setSelfId(welcome.selfId);
       setDevices(welcome.devices);
-      setHistory(welcome.history);
-      setAddresses(welcome.addresses);
+      if (config.mode === "lan") {
+        setHistory(welcome.history);
+        setAddresses(welcome.addresses);
+      } else {
+        directRef.current?.close();
+        directRef.current = null;
+        setupDirect(welcome.devices);
+        const activitySchema = z.object({
+          id: z.uuid(),
+          senderId: z.string(),
+          recipientId: z.string(),
+          senderName: z.string().max(40),
+          recipientName: z.string().max(40),
+          kind: z.enum(["file", "text", "link", "clipboard"]),
+          name: z.string().max(255),
+          size: z.number().nonnegative(),
+          mime: z.string(),
+          content: z
+            .string()
+            .max(64 * 1024)
+            .optional(),
+          offset: z.number().nonnegative(),
+          status: z.enum(["completed", "failed", "cancelled", "rejected"]),
+          createdAt: z.number(),
+          direction: z.enum(["sent", "received"]),
+        });
+        try {
+          const stored = z
+            .array(activitySchema)
+            .max(200)
+            .parse(
+              JSON.parse(sessionStorage.getItem("setu.direct-history") ?? "[]"),
+            );
+          setHistory(
+            stored.filter(
+              (item) => item.createdAt >= Date.now() - RETENTION_MS,
+            ),
+          );
+        } catch {
+          setHistory([]);
+          notify("Stored browser history is unavailable or invalid.", "error");
+        }
+        directHistoryLoaded.current = true;
+        const invitation = roomOwnerRef.current ? null : invitationRef.current;
+        void (
+          invitation
+            ? request<{ expiresAt: number }>(socket, "room:join", {
+                invitation,
+              }).then((room) => {
+                setRoomExpiresAt(room.expiresAt);
+                setAddresses([`${location.origin}/#join=${invitation}`]);
+              })
+            : request<{ invitation: string; expiresAt: number }>(
+                socket,
+                "room:create",
+              ).then((room) => {
+                roomOwnerRef.current = true;
+                invitationRef.current = room.invitation;
+                setRoomExpiresAt(room.expiresAt);
+                setAddresses([`${location.origin}/#join=${room.invitation}`]);
+              })
+        ).catch((failure: Error) => {
+          setError(failure.message);
+          setAddresses([]);
+          setRoomExpiresAt(null);
+        });
+      }
       setStatus("online");
       setError("");
     });
-    socket.on("devices", setDevices);
+    socket.on("devices", (value: Device[]) => {
+      setDevices(value);
+      if (config.mode === "public") setupDirect(value);
+    });
+    socket.on("peer:signal", (signal: unknown) => {
+      void directRef.current?.receiveSignal(signal);
+    });
+    socket.on("room:ended", (value: { error: string }) => {
+      directRef.current?.close();
+      directRef.current = null;
+      invitationRef.current = null;
+      roomOwnerRef.current = false;
+      setRoomExpiresAt(null);
+      setAddresses([]);
+      setDevices([]);
+      setError(value.error);
+    });
     socket.on("network-addresses", setAddresses);
     socket.on("history", setHistory);
     socket.on("activity", (activity: Activity) => {
@@ -341,11 +658,15 @@ export function SharingProvider({ children }: { children: ReactNode }) {
       setStatus("offline");
       setError(
         failure.message === "xhr poll error"
-          ? "Cannot reach the local host. Reconnecting..."
+          ? config.mode === "public"
+            ? "Cannot reach the pairing server. Reconnecting..."
+            : "Cannot reach the local host. Reconnecting..."
           : failure.message,
       );
     });
     socket.on("disconnect", () => {
+      directRef.current?.close();
+      directRef.current = null;
       setStatus("offline");
       setDevices([]);
       for (const [id, transfer] of transferMap.current) {
@@ -377,12 +698,14 @@ export function SharingProvider({ children }: { children: ReactNode }) {
     }
     const objectUrls = urls.current;
     return () => {
+      directRef.current?.close();
+      directRef.current = null;
       socket.removeAllListeners();
       socket.disconnect();
       objectUrls.forEach((value) => URL.revokeObjectURL(value.url));
       objectUrls.clear();
     };
-  }, []);
+  }, [config, preferencesReady]);
 
   useEffect(() => {
     if (!toast) return;
@@ -391,6 +714,13 @@ export function SharingProvider({ children }: { children: ReactNode }) {
   }, [toast]);
 
   async function sendFiles(files: File[], recipientId: string) {
+    if (config?.mode === "public") {
+      if (!directRef.current || !roomExpiresAt)
+        throw new Error("Create or join a private room first.");
+      await directRef.current.sendFiles(files, recipientId);
+      notify("Direct file requests sent. Waiting for approval.");
+      return;
+    }
     if (!socketRef.current || !recipientId)
       throw new Error("Select a nearby device first.");
     if (
@@ -427,6 +757,13 @@ export function SharingProvider({ children }: { children: ReactNode }) {
     recipientId: string,
     kind: Exclude<ShareKind, "file">,
   ) {
+    if (config?.mode === "public") {
+      if (!directRef.current || !roomExpiresAt)
+        throw new Error("Create or join a private room first.");
+      await directRef.current.sendText(content, recipientId, kind);
+      notify("Sent directly to the other device.");
+      return;
+    }
     if (!socketRef.current || !recipientId)
       throw new Error("Select a nearby device first.");
     await request(socketRef.current, "offer", { kind, content, recipientId });
@@ -439,9 +776,20 @@ export function SharingProvider({ children }: { children: ReactNode }) {
     id: string,
     action: "accept" | "reject" | "pause" | "resume" | "cancel",
   ) {
-    const transfer = transferMap.current.get(id);
-    if (!socketRef.current || !transfer) return;
+    if (controlsInFlight.current.has(id))
+      throw new Error("An action is already in progress for this file.");
+    controlsInFlight.current.add(id);
+    setControllingIds(new Set(controlsInFlight.current));
     try {
+      if (config?.mode === "public") {
+        if (!directRef.current)
+          throw new Error("Direct room connection is unavailable.");
+        await directRef.current.control(id, action);
+        return;
+      }
+      const transfer = transferMap.current.get(id);
+      if (!socketRef.current || !transfer)
+        throw new Error("The transfer is no longer available.");
       if (action === "accept") {
         const used =
           [...incoming.current.values()].reduce(
@@ -465,11 +813,12 @@ export function SharingProvider({ children }: { children: ReactNode }) {
       await request(socketRef.current, "control", { id, action });
       if (action === "resume") pumpRef.current(id);
     } catch (failure) {
-      if (action === "accept") incoming.current.delete(id);
-      notify(
-        failure instanceof Error ? failure.message : "Action failed.",
-        "error",
-      );
+      if (config?.mode !== "public" && action === "accept")
+        incoming.current.delete(id);
+      throw failure;
+    } finally {
+      controlsInFlight.current.delete(id);
+      setControllingIds(new Set(controlsInFlight.current));
     }
   }
 
@@ -481,10 +830,22 @@ export function SharingProvider({ children }: { children: ReactNode }) {
       throw new Error("Room PINs must be 4 to 8 digits, or empty.");
     const socket = socketRef.current;
     const next = { ...nextPreferences, name };
+    if (config?.mode === "public" && next.pin !== preferences.pin)
+      throw new Error("Public rooms use invitation links, not numeric PINs.");
+    if (socket) {
+      const previousAuth = socket.auth as Record<string, unknown>;
+      if (next.pin !== preferences.pin || !socket.connected) {
+        socket.auth = { ...previousAuth, name, pin: next.pin };
+        socket.disconnect().connect();
+      } else if (name !== preferences.name) {
+        await request(socket, "rename", name);
+        socket.auth = { ...previousAuth, name, pin: next.pin };
+      }
+    }
     try {
       localStorage.setItem("setu.preferences", JSON.stringify(next));
     } catch {
-      setError(
+      throw new Error(
         "Browser storage is unavailable. Preferences will not persist after closing this tab.",
       );
     }
@@ -495,14 +856,6 @@ export function SharingProvider({ children }: { children: ReactNode }) {
           : "light"
         : next.theme;
     setPreferences(next);
-    if (socket) {
-      const previousAuth = socket.auth as Record<string, unknown>;
-      socket.auth = { ...previousAuth, name, pin: next.pin };
-      if (next.pin !== preferences.pin || !socket.connected) {
-        socket.disconnect().connect();
-      } else await request(socket, "rename", name);
-    }
-    notify("Preferences saved.");
   }
 
   function releaseDownload(id: string) {
@@ -518,7 +871,10 @@ export function SharingProvider({ children }: { children: ReactNode }) {
 
   async function clearHistory() {
     if (!socketRef.current) return;
-    await request(socketRef.current, "clear-history");
+    if (config?.mode === "public") {
+      sessionStorage.removeItem("setu.direct-history");
+      setHistory([]);
+    } else await request(socketRef.current, "clear-history");
     for (const id of urls.current.keys()) releaseDownload(id);
     for (const [id, transfer] of transferMap.current)
       if (!isActive(transfer)) transferMap.current.delete(id);
@@ -529,6 +885,11 @@ export function SharingProvider({ children }: { children: ReactNode }) {
   return (
     <SharingContext.Provider
       value={{
+        mode: config?.mode ?? "lan",
+        configurationReady: config !== null,
+        roomExpiresAt,
+        createRoom,
+        leaveRoom,
         pairingOpen,
         setPairingOpen,
         selfId,
@@ -540,7 +901,9 @@ export function SharingProvider({ children }: { children: ReactNode }) {
         transport,
         error,
         preferences,
+        preferencesReady,
         downloads,
+        controllingIds,
         notify,
         sendFiles,
         sendText,

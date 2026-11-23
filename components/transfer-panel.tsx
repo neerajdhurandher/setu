@@ -10,6 +10,7 @@ import {
   FileImage,
   FileText,
   Link2,
+  Loader2,
   Pause,
   Play,
   X,
@@ -35,8 +36,8 @@ export function ShareIcon({
 }
 
 function TransferItem({ item }: { item: Transfer }) {
-  const { selfId, control, downloads } = useSharing();
-  const [busy, setBusy] = useState(false);
+  const { selfId, control, downloads, controllingIds, notify } = useSharing();
+  const busy = controllingIds.has(item.id);
   const [speed, setSpeed] = useState(0);
   const sample = useRef({ offset: item.offset, at: 0 });
   const receiving = item.recipientId === selfId;
@@ -71,11 +72,13 @@ function TransferItem({ item }: { item: Transfer }) {
     action: "accept" | "reject" | "pause" | "resume" | "cancel",
   ) {
     if (busy) return;
-    setBusy(true);
     try {
       await control(item.id, action);
-    } finally {
-      setBusy(false);
+    } catch (error) {
+      notify(
+        error instanceof Error ? error.message : "Action failed.",
+        "error",
+      );
     }
   }
 
@@ -218,6 +221,117 @@ function TransferItem({ item }: { item: Transfer }) {
   );
 }
 
+export function DownloadAllButton({ items }: { items: Transfer[] }) {
+  const { selfId, downloads, notify } = useSharing();
+  const [busy, setBusy] = useState(false);
+  const archiveUrl = useRef<string | null>(null);
+  const mounted = useRef(false);
+  const available = items.filter(
+    (item) =>
+      item.kind === "file" &&
+      item.recipientId === selfId &&
+      item.status === "completed" &&
+      downloads[item.id],
+  );
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (archiveUrl.current) URL.revokeObjectURL(archiveUrl.current);
+    };
+  }, []);
+
+  async function download() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const { createDownloadArchive } = await import("@/lib/download-archive");
+      const blob = await createDownloadArchive(
+        available.map((item) => ({ name: item.name, url: downloads[item.id] })),
+      );
+      if (!mounted.current) return;
+      if (archiveUrl.current) URL.revokeObjectURL(archiveUrl.current);
+      archiveUrl.current = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = archiveUrl.current;
+      link.download = "setu-received-files.zip";
+      document.body.append(link);
+      link.click();
+      link.remove();
+    } catch (error) {
+      notify(
+        error instanceof Error ? error.message : "Could not create the ZIP.",
+        "error",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (available.length < 2) return null;
+  return (
+    <Button size="small" disabled={busy} onClick={download}>
+      {busy ? <Loader2 className="spin" size={15} /> : <Download size={15} />}
+      {busy ? "Preparing ZIP..." : "Download all"}
+    </Button>
+  );
+}
+
+function IncomingBatchActions({ items }: { items: Transfer[] }) {
+  const { selfId, control, controllingIds, notify } = useSharing();
+  const pending = items.filter(
+    (item) =>
+      item.kind === "file" &&
+      item.recipientId === selfId &&
+      item.status === "pending",
+  );
+  const busy = items.some((item) => controllingIds.has(item.id));
+
+  async function act(action: "accept" | "reject") {
+    const results = await Promise.allSettled(
+      pending.map((item) => control(item.id, action)),
+    );
+    const failures = results.flatMap((result, index) =>
+      result.status === "rejected"
+        ? [
+            `${pending[index].name}: ${
+              result.reason instanceof Error
+                ? result.reason.message
+                : "Action failed."
+            }`,
+          ]
+        : [],
+    );
+    if (failures.length)
+      notify(
+        `Could not ${action} ${failures.length} file(s). ${failures.join(" ")}`,
+        "error",
+      );
+  }
+
+  return (
+    <div className="batch-actions">
+      {pending.length > 1 && (
+        <>
+          <Button
+            variant="outline"
+            size="small"
+            disabled={busy}
+            onClick={() => act("reject")}
+          >
+            <X size={15} /> Reject all
+          </Button>
+          <Button size="small" disabled={busy} onClick={() => act("accept")}>
+            <Check size={15} /> Accept all
+          </Button>
+        </>
+      )}
+      <DownloadAllButton items={items} />
+    </div>
+  );
+}
+
 export function TransferQueue({ receivedOnly }: { receivedOnly: boolean }) {
   const { transfers, selfId } = useSharing();
   const active = transfers.filter(
@@ -269,6 +383,7 @@ export function TransferQueue({ receivedOnly }: { receivedOnly: boolean }) {
           </div>
         </div>
       )}
+      <IncomingBatchActions items={active} />
       <div className="transfer-list">
         {active.map((item) => (
           <TransferItem key={item.id} item={item} />
@@ -325,6 +440,7 @@ export function IncomingFilesDialog() {
           : `${incoming.length} incoming file transfers`
       }
     >
+      <IncomingBatchActions items={incoming} />
       <div className="transfer-list">
         {incoming.map((item) => (
           <TransferItem key={item.id} item={item} />

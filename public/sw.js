@@ -1,4 +1,4 @@
-const CACHE = "setu-shell-v1";
+const CACHE = "setu-shell-v2";
 const SHELL = ["/", "/send", "/receive", "/history", "/settings", "/offline.html", "/icon.svg", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", (event) => {
@@ -25,7 +25,8 @@ self.addEventListener("fetch", (event) => {
   const { request } = event;
   const url = new URL(request.url);
   if (request.method !== "GET" || url.origin !== self.location.origin ||
-    url.pathname.startsWith("/socket.io") || request.headers.get("RSC") === "1") return;
+    url.pathname.startsWith("/socket.io") || url.pathname.startsWith("/api/") ||
+    url.pathname === "/healthz" || request.headers.get("RSC") === "1") return;
   if (request.mode === "navigate") {
     event.respondWith(fetch(request).then((response) => {
       if (response.ok) {

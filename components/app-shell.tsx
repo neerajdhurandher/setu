@@ -60,6 +60,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const {
+    mode,
     status,
     transport,
     preferences,
@@ -186,7 +187,9 @@ export function AppShell({ children }: { children: ReactNode }) {
               className={`transport-badge ${transport ?? "checking"}`}
               title={
                 transport === "https"
-                  ? "HTTPS protects this connection; a room PIN is not end-to-end encryption."
+                  ? mode === "public"
+                    ? "Pairing uses HTTPS. Content travels directly over encrypted WebRTC."
+                    : "HTTPS protects this connection; a room PIN is not end-to-end encryption."
                   : "HTTP is unencrypted. Use a trusted network; a room PIN does not encrypt content."
               }
             >
@@ -205,7 +208,9 @@ export function AppShell({ children }: { children: ReactNode }) {
             <span className="network-pill">
               <i className={`status-dot ${status}`} />
               {status === "online"
-                ? "Local session"
+                ? mode === "public"
+                  ? "Private room"
+                  : "Local session"
                 : status === "connecting"
                   ? "Connecting"
                   : "Offline"}
@@ -272,23 +277,42 @@ export function AppShell({ children }: { children: ReactNode }) {
       >
         <div className="help-content">
           <p>
-            Open the host&apos;s Wi-Fi address on another device connected to
-            the same network. Devices with the same room PIN appear together.
+            {mode === "public" ? (
+              "Scan the room QR code or open its private invitation on another device. No account is required. Use the same Wi-Fi; guest-network isolation can block direct connections."
+            ) : (
+              <>
+                Open the host&apos;s Wi-Fi address on another device connected
+                to the same network. Devices with the same room PIN appear
+                together.
+              </>
+            )}
           </p>
           <p>
             File transfers require approval. Keep both tabs open during a
-            transfer. Files are relayed through the host without being saved to
-            disk; downloads remain in this tab until it is closed or refreshed.
+            transfer.{" "}
+            {mode === "public"
+              ? "Files go directly between browsers, without cloud relay."
+              : "Files are relayed through the host without being saved to disk;"}{" "}
+            downloads remain in this tab until it is closed or refreshed.
           </p>
           <p>
-            Activity and shared text expire after 24 hours. HTTP traffic is not
-            encrypted. Use a trusted network, or configure HTTPS for sensitive
-            data, clipboard access, and PWA installation on mobile.
+            {mode === "public" ? (
+              "Files, text, links and clipboard are sent directly between browsers using encrypted WebRTC, never via Oracle. History is kept in this browser tab only for up to 24 hours. The pairing server sees connection metadata, not shared content. Anyone with an unexpired invitation can join."
+            ) : (
+              <>
+                Activity and shared text expire after 24 hours. HTTP traffic is
+                not encrypted. Use a trusted network, or configure HTTPS for
+                sensitive data, clipboard access, and PWA installation on
+                mobile.
+              </>
+            )}
           </p>
           <div className="help-shortcut">
             <Command size={16} />
             <span>
-              Setu is self-hosted and does not contact external services.
+              {mode === "public"
+                ? "A configurable STUN service may assist direct connections. No TURN or cloud-content relay fallback is used."
+                : "Setu is self-hosted and does not contact external services."}
             </span>
           </div>
         </div>
@@ -300,7 +324,11 @@ export function AppShell({ children }: { children: ReactNode }) {
         open={pairingOpen}
         onOpenChange={setPairingOpen}
         title="Bring another device closer"
-        description="Your local session"
+        description={
+          mode === "public"
+            ? "Private invitation. Direct sharing."
+            : "Your local session"
+        }
       >
         <PairingPanel />
       </Dialog>

@@ -2,13 +2,15 @@ import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { io } from "socket.io-client";
-import { CHUNK_SIZE, type Welcome } from "../lib/protocol";
+import { CHUNK_SIZE, MAX_FILE_SIZE, type Welcome } from "../lib/protocol";
+import { unzipSync } from "fflate";
 
 async function rename(page: Page, name: string) {
   await page.getByRole("link", { name: "Settings", exact: true }).click();
   await page.getByLabel("Device name", { exact: true }).fill(name);
-  await page.getByRole("button", { name: "Save preferences" }).click();
-  await expect(page.getByRole("status")).toContainText("Preferences saved.");
+  await expect(page.locator(".settings-save")).toContainText(
+    "All changes saved",
+  );
   await page.getByRole("link", { name: "Overview", exact: true }).click();
 }
 
@@ -57,40 +59,170 @@ test("pairing opens from the sidebar or mobile header on every page", async ({
   }
 });
 
-test("Settings previews, resets, and persists the system theme", async ({
+test("Settings automatically saves edits and persists the system theme", async ({
   page,
 }) => {
   await page.goto("/settings");
   await expect(page.locator(".network-pill")).toHaveText("Local session");
   await expect(
     page.getByRole("button", { name: "Save preferences" }),
-  ).toBeDisabled();
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Reset", exact: true }),
+  ).toHaveCount(0);
   await page.getByRole("button", { name: "Light", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Reset", exact: true }),
+  ).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-  await expect(page.locator(".unsaved-indicator")).toHaveText(
-    "Unsaved changes",
+  await expect(page.locator(".settings-save")).toContainText(
+    "All changes saved",
   );
-  await page.getByRole("button", { name: "Reset", exact: true }).click();
-  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.getByLabel("Device name", { exact: true }).fill("");
+  await expect(page.locator(".settings-save")).toContainText(
+    "Device names must",
+  );
+  await page
+    .getByLabel("Device name", { exact: true })
+    .fill("Auto-saved device");
+  await expect(page.locator(".settings-save")).toContainText(
+    "All changes saved",
+  );
+  await page
+    .getByRole("switch", { name: "Received share notifications" })
+    .uncheck();
+  await expect(page.locator(".settings-save")).toContainText(
+    "All changes saved",
+  );
+  await page.getByLabel("Room PIN", { exact: true }).fill("12");
+  await expect(page.locator(".settings-save")).toContainText("Room PINs must");
+  await page.getByLabel("Room PIN", { exact: true }).fill("1234");
+  await page.getByLabel("Room PIN", { exact: true }).blur();
+  await expect(page.locator(".settings-save")).toContainText(
+    "All changes saved",
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => JSON.parse(localStorage.getItem("setu.preferences")!).pin,
+      ),
+    )
+    .toBe("1234");
+  await page.getByLabel("Room PIN", { exact: true }).fill("");
+  await expect(page.locator(".settings-save")).toContainText(
+    "All changes saved",
+  );
   await page.emulateMedia({ colorScheme: "dark" });
   await page.getByRole("button", { name: "System", exact: true }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await page.emulateMedia({ colorScheme: "light" });
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-  await page.getByRole("button", { name: "Save preferences" }).click();
-  await expect(page.getByRole("status")).toContainText("Preferences saved.");
+  await expect(page.locator(".settings-save")).toContainText(
+    "All changes saved",
+  );
   await page.reload();
   await expect(
     page.getByRole("button", { name: "System", exact: true }),
   ).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await expect(page.getByLabel("Device name", { exact: true })).toHaveValue(
+    "Auto-saved device",
+  );
+  await expect(
+    page.getByRole("switch", { name: "Received share notifications" }),
+  ).not.toBeChecked();
   await page.getByRole("button", { name: "Dark", exact: true }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.locator(".settings-save")).toContainText(
+    "All changes saved",
+  );
+  await page.getByRole("button", { name: "Reset", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "System", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await expect(page.locator(".settings-save")).toContainText(
+    "All changes saved",
+  );
   await page.getByRole("link", { name: "Overview", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "Your sharing space." }),
   ).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+});
+
+test("Settings loads saved preferences without a socket and preserves edits when it reconnects", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    if (!localStorage.getItem("setu.preferences"))
+      localStorage.setItem(
+        "setu.preferences",
+        JSON.stringify({
+          name: "Original device",
+          theme: "light",
+          timeFormat: "24h",
+          pin: "",
+          notifications: true,
+        }),
+      );
+  });
+  await page.route("**/socket.io/**", (route) => route.abort());
+  await page.goto("/settings");
+  await expect(page.locator(".network-pill")).toHaveText("Offline");
+  await expect(page.getByLabel("Device name", { exact: true })).toHaveValue(
+    "Original device",
+  );
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await expect(page.getByLabel("Room PIN", { exact: true })).toBeEnabled();
+  await page.getByLabel("Device name", { exact: true }).fill("Offline device");
+  await expect(page.locator(".settings-save")).toContainText(
+    "All changes saved",
+  );
+  await page.unroute("**/socket.io/**");
+  await expect(page.locator(".network-pill")).toHaveText("Local session", {
+    timeout: 15_000,
+  });
+  await expect(page.getByLabel("Device name", { exact: true })).toHaveValue(
+    "Offline device",
+  );
+  await page.getByRole("button", { name: "Reset", exact: true }).click();
+  await expect(page.locator(".settings-save")).toContainText(
+    "All changes saved",
+  );
+  await expect(page.getByLabel("Device name", { exact: true })).toHaveValue(
+    "Original device",
+  );
+  await page.getByRole("link", { name: "Overview", exact: true }).click();
+  await expect(page.locator(".self-device")).toContainText("Original device");
+});
+
+test("Settings saves locally when configuration fails and applies edits after recovery", async ({
+  page,
+}) => {
+  await page.route("**/api/config", (route) => route.abort());
+  await page.goto("/settings");
+  await expect(page.locator(".network-pill")).toHaveText("Offline");
+  await expect(page.getByLabel("Device name", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Room PIN", { exact: true })).toBeDisabled();
+  await expect(page.locator(".settings-form")).toContainText(
+    "Room settings are unavailable until the server configuration loads.",
+  );
+  await page
+    .getByLabel("Device name", { exact: true })
+    .fill("Recovered device");
+  await expect(page.locator(".settings-save")).toContainText(
+    "All changes saved",
+  );
+  await page.unroute("**/api/config");
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await expect(page.locator(".network-pill")).toHaveText("Local session");
+  await expect(page.getByLabel("Room PIN", { exact: true })).toBeEnabled();
+  await expect(page.getByLabel("Device name", { exact: true })).toHaveValue(
+    "Recovered device",
+  );
+  await page.getByRole("link", { name: "Overview", exact: true }).click();
+  await expect(page.locator(".self-device")).toContainText("Recovered device");
 });
 
 test("transfer feedback shows real progress, speed, pause, and interruption", async ({
@@ -181,6 +313,156 @@ test("transfer feedback shows real progress, speed, pause, and interruption", as
     sender.disconnect();
     await expect(transfer.getByRole("status")).toHaveText("Failed");
     await expect(transfer).toContainText("Reconnect both devices");
+  } finally {
+    sender.disconnect();
+  }
+});
+
+test("bulk incoming approvals, rejections, and ZIP downloads keep individual controls", async ({
+  page,
+}) => {
+  await page.goto("/receive");
+  await expect(page.locator(".network-pill")).toHaveText("Local session");
+  await rename(page, "Bulk Receiver");
+  const sender = io(new URL("/", page.url()).origin, {
+    transports: ["websocket"],
+    reconnection: false,
+    auth: {
+      sessionId: randomUUID(),
+      name: "Bulk Sender",
+      platform: "desktop",
+      os: "Test",
+      pin: "",
+    },
+  });
+  try {
+    const welcome = await new Promise<Welcome>((resolve, reject) => {
+      sender.once("welcome", resolve);
+      sender.once("connect_error", reject);
+    });
+    const recipient = welcome.devices.find(
+      (device) => device.name === "Bulk Receiver",
+    )!;
+    async function offer(name: string, size: number) {
+      const reply = await sender.timeout(5000).emitWithAck("offer", {
+        kind: "file",
+        recipientId: recipient.id,
+        name,
+        size,
+        mime: "application/octet-stream",
+      });
+      expect(reply.ok).toBe(true);
+      return reply.transfer.id as string;
+    }
+    const bytes = [Buffer.from([0, 1, 255]), Buffer.from("second file")];
+    const first = await offer("first.bin", bytes[0].length);
+    const dialog = page.getByRole("dialog");
+    await expect(
+      dialog.getByRole("button", { name: "Accept all", exact: true }),
+    ).toHaveCount(0);
+    const second = await offer("second.bin", bytes[1].length);
+    await expect(
+      dialog.getByRole("button", { name: "Accept all", exact: true }),
+    ).toBeVisible();
+    await expect(
+      dialog.getByRole("button", { name: "Reject all", exact: true }),
+    ).toBeVisible();
+    await expect(
+      dialog.getByRole("button", { name: "Accept", exact: true }),
+    ).toHaveCount(2);
+    await dialog
+      .getByRole("button", { name: "Accept all", exact: true })
+      .click();
+    await expect(dialog.locator('[data-status="transferring"]')).toHaveCount(2);
+    const reply = await sender.timeout(5000).emitWithAck("chunk", {
+      id: first,
+      offset: 0,
+      data: bytes[0],
+    });
+    expect(reply.ok).toBe(true);
+    await expect(
+      dialog.getByRole("link", { name: "Download first.bin", exact: true }),
+    ).toBeVisible();
+    await expect(
+      dialog.getByRole("button", { name: "Download all", exact: true }),
+    ).toHaveCount(0);
+    const completed = await sender.timeout(5000).emitWithAck("chunk", {
+      id: second,
+      offset: 0,
+      data: bytes[1],
+    });
+    expect(completed.ok).toBe(true);
+    await expect(
+      dialog.getByRole("link", { name: /^Download .*\.bin$/ }),
+    ).toHaveCount(2);
+    const downloading = page.waitForEvent("download");
+    await dialog
+      .getByRole("button", { name: "Download all", exact: true })
+      .click();
+    const archive = await downloading;
+    expect(archive.suggestedFilename()).toBe("setu-received-files.zip");
+    const entries = unzipSync(await readFile((await archive.path())!));
+    expect(Object.keys(entries).sort()).toEqual(["first.bin", "second.bin"]);
+    expect(Buffer.from(entries["first.bin"])).toEqual(bytes[0]);
+    expect(Buffer.from(entries["second.bin"])).toEqual(bytes[1]);
+
+    await dialog.getByRole("button", { name: "Close dialog" }).click();
+    await page.getByRole("link", { name: "Receive", exact: true }).click();
+    const activity = page.locator(".activity-section");
+    await expect(
+      activity.getByRole("button", { name: "Download all", exact: true }),
+    ).toBeVisible();
+    await expect(
+      activity.getByRole("link", { name: /^Download .*\.bin$/ }),
+    ).toHaveCount(2);
+    await offer("decline-one.bin", 10);
+    await offer("decline-two.bin", 10);
+    await expect(
+      dialog.getByRole("button", { name: "Reject all", exact: true }),
+    ).toBeVisible();
+    await dialog.getByRole("button", { name: "Close dialog" }).click();
+    const queue = page.locator(".transfer-section");
+    await expect(
+      queue.getByRole("button", { name: "Accept all", exact: true }),
+    ).toBeVisible();
+    await queue
+      .getByRole("button", { name: "Reject all", exact: true })
+      .click();
+    await expect(page.locator(".transfer-section")).toHaveCount(0);
+    await expect(
+      activity
+        .locator('[class*="status-label"]')
+        .filter({ hasText: "rejected", visible: true }),
+    ).toHaveCount(2);
+    const secondDownload = page.waitForEvent("download");
+    await activity
+      .getByRole("button", { name: "Download all", exact: true })
+      .click();
+    const receivedArchive = await secondDownload;
+    expect(
+      Object.keys(
+        unzipSync(await readFile((await receivedArchive.path())!)),
+      ).sort(),
+    ).toEqual(["first.bin", "second.bin"]);
+    await offer("fits.bin", 20);
+    await offer("too-large.bin", MAX_FILE_SIZE);
+    await dialog
+      .getByRole("button", { name: "Accept all", exact: true })
+      .click();
+    await expect(page.locator(".toast-error")).toContainText(
+      "Could not accept 1 file(s). too-large.bin: Receive buffer is full.",
+    );
+    await expect(dialog.locator('[data-status="transferring"]')).toHaveCount(1);
+    await expect(dialog.locator('[data-status="pending"]')).toHaveCount(1);
+    await dialog
+      .getByRole("button", { name: "Accept all", exact: true })
+      .waitFor({ state: "detached" });
+    await dialog
+      .getByRole("button", { name: "Cancel fits.bin", exact: true })
+      .click();
+    await dialog
+      .getByRole("button", { name: "Reject too-large.bin", exact: true })
+      .click();
   } finally {
     sender.disconnect();
   }
@@ -432,7 +714,9 @@ test("two browsers discover, share, download, and manage history", async ({
     ).toHaveAttribute("aria-pressed", "true");
     await page.getByRole("button", { name: "24-hour", exact: true }).click();
     await page.getByRole("button", { name: "Light", exact: true }).click();
-    await page.getByRole("button", { name: "Save preferences" }).click();
+    await expect(page.locator(".settings-save")).toContainText(
+      "All changes saved",
+    );
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
     await page.reload();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");

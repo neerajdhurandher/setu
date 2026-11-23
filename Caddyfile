@@ -1,0 +1,9 @@
+{$SETU_DOMAIN} {
+	reverse_proxy setu:3000 {
+		header_up Host {http.request.host}
+		header_up X-Forwarded-Host {http.request.host}
+		header_up X-Forwarded-Proto https
+		header_up X-Forwarded-For {http.request.remote.host}
+		header_up -Forwarded
+	}
+}

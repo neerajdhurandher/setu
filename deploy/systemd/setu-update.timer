@@ -1,0 +1,13 @@
+[Unit]
+Description=Check for a new Setu release once a day
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1d
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target
+
+#To deploy sooner, run this on the VM:
+#   sudo systemctl start setu-update

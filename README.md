@@ -84,6 +84,22 @@ SETU_PUBLIC_URL=http://192.168.1.10:3000 docker compose up --build
 
 Replace the example IP with your host's Wi-Fi IP. Activity is stored in the `setu-data` volume. Keep the published port restricted to your LAN. For HTTPS, put a trusted **local** reverse proxy in front, forward WebSocket upgrade headers, and set `SETU_PUBLIC_URL` to that HTTPS origin.
 
+### Public Docker hosting
+
+Use [compose.public.yaml](./compose.public.yaml), not the LAN Compose file. It publishes only Caddy ports 80/443; the application port stays private and public mode has no SQLite volume. It runs a prebuilt image (`SETU_IMAGE`) rather than building on the server.
+
+Production deploys are pull-based. Every push to `main` runs [.github/workflows/deploy.yml](./.github/workflows/deploy.yml), which tests, builds a `linux/amd64` image and publishes it to `ghcr.io/neerajdhurandher/setu` as `sha-<commit>`. GitHub never connects to the server. On the VM, a systemd timer runs [deploy/setu-update.sh](./deploy/setu-update.sh) once a day (and 2 minutes after boot): when `main` has a new commit whose image is published, it checks out that commit's Compose/Caddy files, pulls the matching image, restarts, and rolls back automatically if the health check fails. Units are in [deploy/systemd](./deploy/systemd). The only file created by hand on the server is `~/setu/.env.public`:
+
+```bash
+openssl rand -hex 32
+# Put that private output into SETU_SESSION_SECRET in .env.public.
+# Set SETU_DOMAIN and, optionally, SETU_STUN_URLS (see .env.public.example).
+```
+
+Do not commit `.env.public`. Point your domain at the VM and allow TCP 80/443 before startup so Caddy can issue HTTPS certificates. The supplied Docker subnet `172.30.0.0/24` must not overlap existing networks; if changed, update the Caddy address and trusted proxy CIDR together. Do not add another upstream proxy/CDN without revisiting the trust policy.
+
+See [ORACLE_DEPLOYMENT_PLAN.md](./ORACLE_DEPLOYMENT_PLAN.md) for deployment, physical-device verification, and rollback. GitHub Pages cannot host the signaling server; keep the existing Pages website and use a separate app subdomain.
+
 ## Checks
 
 ```bash
